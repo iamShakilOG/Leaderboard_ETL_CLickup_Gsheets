@@ -910,14 +910,13 @@ class FinalReportGenerator:
     def generate(
         self,
         source_target: GoogleSheetTarget,
+        rating_target: GoogleSheetTarget,
         output_target: GoogleSheetTarget,
     ) -> None:
-        worksheet = self.sheets.worksheet(source_target)
-        values = worksheet.get_all_values()
-        if len(values) <= 1:
+        df = self._load_worksheet_dataframe(source_target)
+        if df.empty:
             self.logger.warning("No data found in worksheet '%s'", source_target.worksheet_name)
             return
-        df = pd.DataFrame(values[1:], columns=values[0])
         original_columns = [column for column in df.columns if column != "Type"]
         numeric_columns = ["Effective Hour", "Bonus", "Penalty", "Final Working Hour"]
         for column in numeric_columns:
@@ -945,9 +944,67 @@ class FinalReportGenerator:
         if output_df.empty:
             self.logger.warning("Final report dataset is empty after aggregation")
             return
-        output_df = output_df[original_columns].replace([np.nan, np.inf, -np.inf], "")
+        output_df = self._merge_rating_and_contribution(output_df, rating_target)
+        output_df = output_df.replace([np.nan, np.inf, -np.inf], "")
         self.sheets.replace_dataframe(output_target, output_df)
         self.logger.info("Generated final report with %s rows", len(output_df))
+
+    def _load_worksheet_dataframe(self, target: GoogleSheetTarget) -> pd.DataFrame:
+        worksheet = self.sheets.worksheet(target)
+        values = worksheet.get_all_values()
+        if len(values) <= 1:
+            return pd.DataFrame()
+        return pd.DataFrame(values[1:], columns=values[0])
+
+    def _merge_rating_and_contribution(
+        self,
+        output_df: pd.DataFrame,
+        rating_target: GoogleSheetTarget,
+    ) -> pd.DataFrame:
+        rating_df = self._load_worksheet_dataframe(rating_target)
+        if rating_df.empty:
+            self.logger.warning(
+                "No rating data found in worksheet '%s'; final report will keep blank rating fields",
+                rating_target.worksheet_name,
+            )
+            output_df["Rating"] = output_df.get("Rating", "")
+            output_df["Contribution"] = output_df.get("Contribution", "")
+            return output_df
+
+        required_columns = {"Project Name", "QAI ID", "Rating"}
+        if not required_columns.issubset(rating_df.columns):
+            self.logger.warning(
+                "Worksheet '%s' is missing expected columns; final report will keep blank rating fields",
+                rating_target.worksheet_name,
+            )
+            output_df["Rating"] = output_df.get("Rating", "")
+            output_df["Contribution"] = output_df.get("Contribution", "")
+            return output_df
+
+        contribution_column = "Contribution%" if "Contribution%" in rating_df.columns else "Contribution"
+        rating_lookup = (
+            rating_df[
+                ["Project Name", "QAI ID", "Rating"]
+                + ([contribution_column] if contribution_column in rating_df.columns else [])
+            ]
+            .drop_duplicates(subset=["Project Name", "QAI ID"], keep="last")
+            .rename(columns={contribution_column: "Contribution"})
+        )
+        merged_df = output_df.drop(columns=["Rating", "Contribution"], errors="ignore").merge(
+            rating_lookup,
+            on=["Project Name", "QAI ID"],
+            how="left",
+        )
+        merged_df["Rating"] = merged_df["Rating"].fillna("")
+        merged_df["Contribution"] = merged_df["Contribution"].fillna("")
+
+        columns = [column for column in output_df.columns if column != "Rating"]
+        if "Accuracy" in columns:
+            insert_at = columns.index("Accuracy") + 1
+        else:
+            insert_at = len(columns)
+        columns[insert_at:insert_at] = ["Rating", "Contribution"]
+        return merged_df.reindex(columns=columns)
 
     @staticmethod
     def _calculate_accuracy(annotation_acc: Any, qc_acc: Any) -> float:
@@ -1313,7 +1370,7 @@ def main() -> int:
             time.sleep(config.google_retry_sleep_seconds)
 
         final_report_generator = FinalReportGenerator(sheets, logger)
-        final_report_generator.generate(delivery_target, final_report_target)
+        final_report_generator.generate(delivery_target, rating_target, final_report_target)
 
         failure_log = processing_logger.export_to_csv()
         summary.failure_log_file = failure_log
