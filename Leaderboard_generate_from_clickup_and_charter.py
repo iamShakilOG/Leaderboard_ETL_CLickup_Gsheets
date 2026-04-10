@@ -480,8 +480,14 @@ class TextUtils:
     def extract_numeric_value(raw_value: Any) -> Any:
         if raw_value in (None, ""):
             return ""
-        match = re.search(r"\d+", str(raw_value))
-        return float(match.group()) if match else ""
+        match = re.search(r"\d+(?:\.\d+)?", str(raw_value))
+        if not match:
+            return ""
+        numeric_text = match.group()
+        if "." in numeric_text:
+            numeric_value = float(numeric_text)
+            return str(int(numeric_value)) if numeric_value.is_integer() else str(numeric_value)
+        return numeric_text
 
 
 class ColumnMapper:
