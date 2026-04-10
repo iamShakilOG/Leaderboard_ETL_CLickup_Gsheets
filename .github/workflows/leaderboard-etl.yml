@@ -1,0 +1,71 @@
+name: Leaderboard ETL
+
+on:
+  schedule:
+    - cron: "15 3 * * *"
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: "Run even if today is not on the 3-day cadence"
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  run-etl:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write Google credentials
+        shell: bash
+        run: |
+          mkdir -p secrets
+          printf '%s' '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > secrets/service-account.json
+
+      - name: Run ETL
+        env:
+          CLICKUP_API_TOKEN: ${{ secrets.CLICKUP_API_TOKEN }}
+          CLICKUP_LIST_ID: ${{ secrets.CLICKUP_LIST_ID }}
+          GOOGLE_APPLICATION_CREDENTIALS: ./secrets/service-account.json
+          DELIVERY_SHEET_KEY: ${{ secrets.DELIVERY_SHEET_KEY }}
+          DELIVERY_WORKSHEET: charter_stats
+          RATING_WORKSHEET: rating_and_contribution
+          FINAL_REPORT_WORKSHEET: final_report
+          ETL_LOGS_WORKSHEET: ETL_Logs
+          START_DATE: 2025-06-01
+          END_DATE: ""
+          YEAR_FILTER: 2025
+          PAGE_SIZE: 100
+          TIME_ZONE_OFFSET: 6
+          LOG_LEVEL: INFO
+          SCHEDULE_EVERY_DAYS: 3
+          SCHEDULE_GUARD_ENABLED: true
+          FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_run || 'false' }}
+          CLICKUP_MIN_INTERVAL_SECONDS: 0.8
+          GSHEET_MIN_INTERVAL_SECONDS: 1.2
+          GSHEET_WRITE_CHUNK_SIZE: 500
+          API_MAX_RETRIES: 8
+        run: python Leaderboard_generate_from_clickup_and_charter.py
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: leaderboard-etl-logs
+          path: |
+            logs/
+            *_processing_failures.csv
+          if-no-files-found: ignore

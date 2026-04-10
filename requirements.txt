@@ -1,0 +1,7 @@
+gspread==6.1.2
+google-auth==2.40.1
+numpy==2.2.5
+pandas==2.2.3
+python-dotenv==1.0.1
+rapidfuzz==3.13.0
+requests==2.32.3
