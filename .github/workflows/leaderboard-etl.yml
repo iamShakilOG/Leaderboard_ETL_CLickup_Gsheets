@@ -30,10 +30,55 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Write Google credentials
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         shell: bash
         run: |
-          mkdir -p secrets
-          printf '%s' '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > secrets/service-account.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+          if not raw:
+              raise SystemExit("GOOGLE_SERVICE_ACCOUNT_JSON is empty or missing")
+
+          try:
+              data = json.loads(raw)
+          except json.JSONDecodeError as exc:
+              raise SystemExit(f"GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON: {exc}") from exc
+
+          required = ["type", "project_id", "private_key", "client_email"]
+          missing = [key for key in required if not data.get(key)]
+          if missing:
+              raise SystemExit(f"GOOGLE_SERVICE_ACCOUNT_JSON is missing required keys: {missing}")
+
+          path = Path("secrets/service-account.json")
+          path.parent.mkdir(parents=True, exist_ok=True)
+          path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+          print("Google credentials JSON written successfully.")
+          PY
+
+      - name: Validate Google credentials JSON
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("secrets/service-account.json")
+          raw = path.read_text(encoding="utf-8").strip()
+          if not raw:
+              raise SystemExit("service-account.json was created empty")
+
+          data = json.loads(raw)
+          required = ["type", "project_id", "private_key", "client_email"]
+          missing = [key for key in required if not data.get(key)]
+          if missing:
+              raise SystemExit(f"service-account.json is missing required keys: {missing}")
+
+          print("Google credentials JSON looks valid.")
+          PY
 
       - name: Run ETL
         env:
@@ -41,7 +86,7 @@ jobs:
           CLICKUP_LIST_ID: ${{ secrets.CLICKUP_LIST_ID }}
           GOOGLE_APPLICATION_CREDENTIALS: ./secrets/service-account.json
           DELIVERY_SHEET_KEY: ${{ secrets.DELIVERY_SHEET_KEY }}
-          START_DATE: 2025-06-01
+          START_DATE: ${{ secrets.START_DATE }}
           FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_run || 'false' }}
         run: python Leaderboard_generate_from_clickup_and_charter.py
 
