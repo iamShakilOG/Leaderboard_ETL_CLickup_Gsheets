@@ -9,7 +9,7 @@ This project pulls accepted projects from ClickUp, reads charter and tracker dat
 - Rotating file logs in `logs/`
 - Failure export CSV for skipped and failed projects
 - Rate limiting, retry/backoff, and chunked Google Sheets writes to reduce quota pressure
-- GitHub Actions workflow prepared for automatic runs every 3 days starting from `2025-06-01`
+- GitHub Actions workflow prepared for automatic runs every 3 days
 
 ## Local setup
 
@@ -50,4 +50,4 @@ For normal workflow changes, you usually only need to edit `START_DATE` in [.git
 
 ## Scheduling note
 
-GitHub Actions cron cannot express a perfect "every 3 days from June 1, 2025" schedule. The workflow runs daily at `03:15 UTC`, and the ETL script itself decides whether the current date matches the 3-day cadence starting from `2025-06-01`.
+The workflow is configured to run on a simple every-3-days cron-style schedule. `START_DATE` is used for ETL data filtering, not for deciding whether the workflow is allowed to run.

@@ -56,7 +56,7 @@ class AppConfig:
     time_zone_offset: int = DEFAULT_TIMEZONE_OFFSET
     log_level: str = "INFO"
     schedule_every_days: int = 3
-    schedule_guard_enabled: bool = True
+    schedule_guard_enabled: bool = False
     force_run: bool = False
     clickup_timeout_seconds: int = 60
     google_retry_sleep_seconds: float = 1.0
@@ -87,7 +87,7 @@ class AppConfig:
             time_zone_offset=int(raw.get("TIME_ZONE_OFFSET", str(DEFAULT_TIMEZONE_OFFSET))),
             log_level=raw.get("LOG_LEVEL", "INFO"),
             schedule_every_days=int(raw.get("SCHEDULE_EVERY_DAYS", "3")),
-            schedule_guard_enabled=_parse_bool(raw.get("SCHEDULE_GUARD_ENABLED", "true")),
+            schedule_guard_enabled=_parse_bool(raw.get("SCHEDULE_GUARD_ENABLED", "false")),
             force_run=_parse_bool(raw.get("FORCE_RUN", "false")),
             clickup_timeout_seconds=int(raw.get("CLICKUP_TIMEOUT_SECONDS", "60")),
             google_retry_sleep_seconds=float(raw.get("GOOGLE_RETRY_SLEEP_SECONDS", "1.0")),

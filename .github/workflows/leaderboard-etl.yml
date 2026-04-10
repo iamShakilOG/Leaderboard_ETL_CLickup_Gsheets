@@ -2,11 +2,11 @@ name: Leaderboard ETL
 
 on:
   schedule:
-    - cron: "15 3 * * *"
+    - cron: "15 3 */3 * *"
   workflow_dispatch:
     inputs:
       force_run:
-        description: "Run even if today is not on the 3-day cadence"
+        description: "Run the ETL manually"
         required: false
         default: false
         type: boolean
