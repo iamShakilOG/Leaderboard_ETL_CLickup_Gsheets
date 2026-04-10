@@ -35,9 +35,9 @@ python Leaderboard_generate_from_clickup_and_charter.py --force-run
 python Leaderboard_generate_from_clickup_and_charter.py --start-date 2025-06-01 --end-date 2026-12-31
 ```
 
-## GitHub Actions secrets
+## GitHub Actions setup
 
-Create these repository secrets before pushing:
+Set these repository secrets before pushing:
 
 - `CLICKUP_API_TOKEN`
 - `CLICKUP_LIST_ID`
@@ -45,6 +45,8 @@ Create these repository secrets before pushing:
 - `GOOGLE_SERVICE_ACCOUNT_JSON`
 
 `GOOGLE_SERVICE_ACCOUNT_JSON` must contain the full JSON content of the service account key, not a file path.
+
+For normal workflow changes, you usually only need to edit `START_DATE` in [.github/workflows/leaderboard-etl.yml](/mnt/e/Scripts/Leaderboard_report_automation_from_clickup/.github/workflows/leaderboard-etl.yml). Everything else non-sensitive is hardcoded in the script defaults.
 
 ## Scheduling note
 

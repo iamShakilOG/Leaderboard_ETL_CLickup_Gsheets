@@ -41,23 +41,8 @@ jobs:
           CLICKUP_LIST_ID: ${{ secrets.CLICKUP_LIST_ID }}
           GOOGLE_APPLICATION_CREDENTIALS: ./secrets/service-account.json
           DELIVERY_SHEET_KEY: ${{ secrets.DELIVERY_SHEET_KEY }}
-          DELIVERY_WORKSHEET: charter_stats
-          RATING_WORKSHEET: rating_and_contribution
-          FINAL_REPORT_WORKSHEET: final_report
-          ETL_LOGS_WORKSHEET: ETL_Logs
           START_DATE: 2025-06-01
-          END_DATE: ""
-          YEAR_FILTER: 2025
-          PAGE_SIZE: 100
-          TIME_ZONE_OFFSET: 6
-          LOG_LEVEL: INFO
-          SCHEDULE_EVERY_DAYS: 3
-          SCHEDULE_GUARD_ENABLED: true
           FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force_run || 'false' }}
-          CLICKUP_MIN_INTERVAL_SECONDS: 0.8
-          GSHEET_MIN_INTERVAL_SECONDS: 1.2
-          GSHEET_WRITE_CHUNK_SIZE: 500
-          API_MAX_RETRIES: 8
         run: python Leaderboard_generate_from_clickup_and_charter.py
 
       - name: Upload logs

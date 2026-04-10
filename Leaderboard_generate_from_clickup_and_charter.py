@@ -24,7 +24,7 @@ from urllib3.util.retry import Retry
 
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
-DEFAULT_START_DATE = "2026-04-01"
+DEFAULT_START_DATE = "2025-06-01"
 DEFAULT_TIMEZONE_OFFSET = 6
 DEFAULT_PAGE_SIZE = 100
 
@@ -51,12 +51,12 @@ class AppConfig:
     etl_logs_worksheet: str = "ETL_Logs"
     start_date: str = DEFAULT_START_DATE
     end_date: str = ""
-    year_filter: int = 2025
+    year_filter: Optional[int] = None
     page_size: int = DEFAULT_PAGE_SIZE
     time_zone_offset: int = DEFAULT_TIMEZONE_OFFSET
     log_level: str = "INFO"
     schedule_every_days: int = 3
-    schedule_guard_enabled: bool = False
+    schedule_guard_enabled: bool = True
     force_run: bool = False
     clickup_timeout_seconds: int = 60
     google_retry_sleep_seconds: float = 1.0
@@ -69,6 +69,8 @@ class AppConfig:
     def from_env(cls) -> "AppConfig":
         load_dotenv()
         raw: Dict[str, str] = dict(os.environ)
+        start_date = raw.get("START_DATE", DEFAULT_START_DATE)
+        year_filter_raw = raw.get("YEAR_FILTER", "").strip()
         return cls(
             clickup_api_token=_required_env(raw, "CLICKUP_API_TOKEN"),
             clickup_list_id=_required_env(raw, "CLICKUP_LIST_ID"),
@@ -78,14 +80,14 @@ class AppConfig:
             rating_worksheet=raw.get("RATING_WORKSHEET", "rating_and_contribution"),
             final_report_worksheet=raw.get("FINAL_REPORT_WORKSHEET", "final_report"),
             etl_logs_worksheet=raw.get("ETL_LOGS_WORKSHEET", "ETL_Logs"),
-            start_date=raw.get("START_DATE", DEFAULT_START_DATE),
+            start_date=start_date,
             end_date=raw.get("END_DATE", ""),
-            year_filter=int(raw.get("YEAR_FILTER", "2025")),
+            year_filter=int(year_filter_raw) if year_filter_raw else _parse_iso_date(start_date).year,
             page_size=int(raw.get("PAGE_SIZE", str(DEFAULT_PAGE_SIZE))),
             time_zone_offset=int(raw.get("TIME_ZONE_OFFSET", str(DEFAULT_TIMEZONE_OFFSET))),
             log_level=raw.get("LOG_LEVEL", "INFO"),
             schedule_every_days=int(raw.get("SCHEDULE_EVERY_DAYS", "3")),
-            schedule_guard_enabled=_parse_bool(raw.get("SCHEDULE_GUARD_ENABLED", "false")),
+            schedule_guard_enabled=_parse_bool(raw.get("SCHEDULE_GUARD_ENABLED", "true")),
             force_run=_parse_bool(raw.get("FORCE_RUN", "false")),
             clickup_timeout_seconds=int(raw.get("CLICKUP_TIMEOUT_SECONDS", "60")),
             google_retry_sleep_seconds=float(raw.get("GOOGLE_RETRY_SLEEP_SECONDS", "1.0")),
