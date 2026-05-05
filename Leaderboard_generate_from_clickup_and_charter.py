@@ -62,7 +62,7 @@ class AppConfig:
     google_retry_sleep_seconds: float = 1.0
     clickup_min_interval_seconds: float = 0.8
     gsheet_min_interval_seconds: float = 1.2
-    gsheet_write_chunk_size: int = 500
+    gsheet_write_chunk_size: int = 100
     api_max_retries: int = 8
 
     @classmethod
@@ -339,6 +339,215 @@ class GoogleSheetsClient:
         if not rows:
             return
 
+        required_cols = len(header)
+
+        if not existing_rows:
+            self._ensure_grid_size(worksheet, len(rows) + 1, required_cols)
+            self._update_in_chunks(worksheet, 1, [header] + rows)
+            return
+
+        first_row = existing_rows[0]
+        if not any(str(cell).strip() for cell in first_row):
+            self._ensure_grid_size(worksheet, len(rows) + 1, required_cols)
+            self._update_in_chunks(worksheet, 1, [header] + rows)
+            return
+
+        if [str(cell).strip() for cell in first_row] != header:
+            raise ValueError(
+                f"Worksheet '{target.worksheet_name}' header does not match expected schema."
+            )
+
+        start_row = len(existing_rows) + 1
+        total_needed_rows = start_row + len(rows) - 1
+        self._ensure_grid_size(worksheet, total_needed_rows, required_cols)
+        self._update_in_chunks(worksheet, start_row, rows)
+
+    def replace_dataframe(self, target: GoogleSheetTarget, dataframe: pd.DataFrame) -> None:
+        spreadsheet = self._spreadsheet(target.sheet_key)
+
+        cleaned_df = dataframe.replace([np.nan, np.inf, -np.inf], "")
+        rows = [cleaned_df.columns.tolist()] + cleaned_df.values.tolist()
+
+        required_rows = max(len(rows), 1)
+        required_cols = max(len(cleaned_df.columns), 1)
+
+        try:
+            worksheet = self._with_retry(lambda: spreadsheet.worksheet(target.worksheet_name))
+        except gspread.exceptions.WorksheetNotFound:
+            worksheet = self._with_retry(
+                lambda: spreadsheet.add_worksheet(
+                    title=target.worksheet_name,
+                    rows=max(required_rows, 1000),
+                    cols=max(required_cols, 50),
+                )
+            )
+
+        # Make sure worksheet grid is large enough BEFORE clearing/updating
+        self._ensure_grid_size(worksheet, required_rows, required_cols)
+
+        # Clear old values only; grid size stays expanded
+        self._with_retry(worksheet.clear)
+
+        # Write data
+        self._update_in_chunks(worksheet, 1, rows)
+
+        self.logger.info(
+            "Replaced worksheet '%s' with %s rows x %s cols",
+            target.worksheet_name,
+            required_rows,
+            required_cols,
+        )
+
+    def _ensure_grid_size(self, worksheet: Any, required_rows: int, required_cols: int) -> None:
+        current_rows = getattr(worksheet, "row_count", 0) or 0
+        current_cols = getattr(worksheet, "col_count", 0) or 0
+
+        target_rows = max(current_rows, required_rows)
+        target_cols = max(current_cols, required_cols)
+
+        if current_rows < required_rows or current_cols < required_cols:
+            self.logger.info(
+                "Resizing worksheet '%s' from %s x %s to %s x %s",
+                worksheet.title,
+                current_rows,
+                current_cols,
+                target_rows,
+                target_cols,
+            )
+            self._with_retry(lambda: worksheet.resize(rows=target_rows, cols=target_cols))
+
+            # refresh local counts if gspread object does not update immediately
+            worksheet.row_count = target_rows
+            worksheet.col_count = target_cols
+
+    def _spreadsheet(self, sheet_key: str):
+        if sheet_key not in self._spreadsheet_cache:
+            self._spreadsheet_cache[sheet_key] = self._with_retry(lambda: self.client.open_by_key(sheet_key))
+        return self._spreadsheet_cache[sheet_key]
+
+    def _update_in_chunks(self, worksheet: Any, start_row: int, rows: List[List[Any]]) -> None:
+        if not rows:
+            return
+
+        chunk_size = self.config.gsheet_write_chunk_size
+        max_cols_in_rows = max((len(r) for r in rows), default=1)
+        self._ensure_grid_size(
+            worksheet,
+            start_row + len(rows) - 1,
+            max_cols_in_rows,
+        )
+
+        for chunk_start in range(0, len(rows), chunk_size):
+            chunk = rows[chunk_start : chunk_start + chunk_size]
+            row_number = start_row + chunk_start
+
+            self._with_retry(
+                lambda row_number=row_number, chunk=chunk: worksheet.update(
+                    range_name=f"A{row_number}",
+                    values=chunk,
+                    value_input_option="USER_ENTERED",
+                )
+            )
+
+    def _with_retry(self, operation):
+        last_error: Optional[Exception] = None
+        for attempt in range(1, self.config.api_max_retries + 1):
+            self._wait_for_rate_limit()
+            try:
+                result = operation()
+                self._last_request_time = time.monotonic()
+                return result
+            except gspread.exceptions.APIError as exc:
+                last_error = exc
+                if not self._is_retryable_google_error(exc):
+                    raise
+                sleep_seconds = min(60.0, self.config.gsheet_min_interval_seconds * (2 ** (attempt - 1)))
+                self.logger.warning(
+                    "Google Sheets quota/backoff on attempt %s/%s; sleeping %.1fs",
+                    attempt,
+                    self.config.api_max_retries,
+                    sleep_seconds,
+                )
+                time.sleep(sleep_seconds)
+            except requests.RequestException as exc:
+                last_error = exc
+                sleep_seconds = min(60.0, self.config.gsheet_min_interval_seconds * (2 ** (attempt - 1)))
+                self.logger.warning(
+                    "Google API transport retry on attempt %s/%s; sleeping %.1fs",
+                    attempt,
+                    self.config.api_max_retries,
+                    sleep_seconds,
+                )
+                time.sleep(sleep_seconds)
+        if last_error:
+            raise last_error
+        raise RuntimeError("Google Sheets operation failed without a captured exception.")
+
+    def _wait_for_rate_limit(self) -> None:
+        elapsed = time.monotonic() - self._last_request_time
+        wait_seconds = self.config.gsheet_min_interval_seconds - elapsed
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+
+    @staticmethod
+    def _is_retryable_google_error(exc: Exception) -> bool:
+        error_text = str(exc).lower()
+        retry_markers = [
+            "429",
+            "quota",
+            "rate limit",
+            "user-rate limit",
+            "resource exhausted",
+            "internal error",
+            "backend error",
+            "503",
+            "502",
+            "500",
+        ]
+        return any(marker in error_text for marker in retry_markers)
+    """Wrapper around gspread with small helpers for sheet operations."""
+
+    def __init__(self, config: AppConfig, logger: logging.Logger) -> None:
+        credentials = Credentials.from_service_account_file(
+            str(config.credentials_path),
+            scopes=GOOGLE_SCOPES,
+        )
+        self.client = gspread.authorize(credentials)
+        self.logger = logger
+        self.config = config
+        self._last_request_time = 0.0
+        self._spreadsheet_cache: Dict[str, Any] = {}
+
+    def worksheet(self, target: GoogleSheetTarget):
+        spreadsheet = self._spreadsheet(target.sheet_key)
+        return self._with_retry(lambda: spreadsheet.worksheet(target.worksheet_name))
+
+    def existing_project_names(self, target: GoogleSheetTarget) -> List[str]:
+        worksheet = self.worksheet(target)
+        values = self._with_retry(worksheet.get_all_values)
+        if len(values) <= 1:
+            return []
+        df = pd.DataFrame(values[1:], columns=values[0])
+        if "Project Name" not in df.columns:
+            return []
+        return (
+            df["Project Name"]
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .loc[lambda series: series.ne("")]
+            .unique()
+            .tolist()
+        )
+
+    def append_dataframe(self, target: GoogleSheetTarget, dataframe: pd.DataFrame) -> None:
+        worksheet = self.worksheet(target)
+        existing_rows = self._with_retry(worksheet.get_all_values)
+        header = dataframe.columns.tolist()
+        rows = dataframe.replace([np.nan, np.inf, -np.inf], "").values.tolist()
+        if not rows:
+            return
+
         if not existing_rows:
             self._update_in_chunks(worksheet, 1, [header] + rows)
             return
@@ -468,13 +677,28 @@ class TextUtils:
     def fix_qai_id(raw_value: Any) -> Any:
         if pd.isna(raw_value):
             return raw_value
-        value = str(raw_value).strip().replace(" ", "")
-        value = re.sub(r"(?i)^QAI_?", "", value)
-        match = re.match(r"([A-Za-z]+)(\d+)", value)
-        if not match:
-            return f"QAI_{value.upper()}"
-        letters, digits = match.groups()
-        return f"QAI_{letters.upper()}{digits}"
+
+        value = str(raw_value).strip().upper()
+        if not value:
+            return ""
+
+        # Remove whitespace and punctuation except underscore so we can find IDs in noisy text.
+        value = re.sub(r"[\s\u00A0]+", "", value)
+        value = re.sub(r"[^A-Z0-9_]", "", value)
+
+        # Extract complete IDs like QAI_DK1010 from noisy text.
+        full_match = re.search(r"\bQAI_([A-Z]{2}\d{4})\b", value)
+        if full_match:
+            return f"QAI_{full_match.group(1)}"
+
+        # Also support IDs stored without the QAI_ prefix, like DK1010.
+        suffix_match = re.search(r"\b([A-Z]{2}\d{4})\b", value)
+        if suffix_match:
+            return f"QAI_{suffix_match.group(1)}"
+
+        # Reject incomplete or invalid values such as QAI_.
+        return ""
+
 
     @staticmethod
     def extract_numeric_value(raw_value: Any) -> Any:
@@ -555,13 +779,13 @@ class CharterDataExtractor:
             self.processing_logger.log_error(project_name, "Invalid charter URL", charter_url)
             return None
         try:
-            spreadsheet = self.client.open_by_key(sheet_key)
-            worksheet_map = {ws.title.strip().lower(): ws for ws in spreadsheet.worksheets()}
+            spreadsheet = self.sheets._with_retry(lambda: self.client.open_by_key(sheet_key))
+            worksheet_map = {ws.title.strip().lower(): ws for ws in self.sheets._with_retry(lambda: spreadsheet.worksheets())}
             dashboard = worksheet_map.get("dashboard")
             if not dashboard:
                 self.processing_logger.log_error(project_name, "Dashboard worksheet missing")
                 return None
-            all_data = dashboard.get_all_values()
+            all_data = self.sheets._with_retry(dashboard.get_all_values)
             sections, total_completion_hour = self._parse_sections(all_data)
             prod_ann = self._process_section(project_name, all_data, sections, "Production: Annotation")
             prod_qc = self._process_section(project_name, all_data, sections, "Production: Quality Check")
@@ -707,14 +931,14 @@ class CharterDataExtractor:
 
 class AccuracyTracker:
     def __init__(self, sheets: GoogleSheetsClient, processing_logger: ProcessingLogger) -> None:
-        self.client = sheets.client
+        self.sheets = sheets
         self.processing_logger = processing_logger
 
     def get_accuracy(self, project_name: str, tracker_link: str) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
         try:
-            spreadsheet = self.client.open_by_url(tracker_link)
-            dashboard = spreadsheet.worksheet("Dashboard")
-            values = dashboard.get_all_values()
+            spreadsheet = self.sheets._with_retry(lambda: self.sheets.client.open_by_url(tracker_link))
+            dashboard = self.sheets._with_retry(lambda: spreadsheet.worksheet("Dashboard"))
+            values = self.sheets._with_retry(dashboard.get_all_values)
             if len(values) <= 1:
                 self.processing_logger.log_tracker_error(project_name, "Tracker dashboard is empty")
                 return None
@@ -879,6 +1103,10 @@ class DataExporter:
             self.processing_logger.log_skip(project_name, "Charter is empty")
             return
         delivery_df = pd.concat(prepared, ignore_index=True).replace([np.nan, np.inf, -np.inf], "")
+        if "QAI ID" in delivery_df.columns:
+            delivery_df["QAI ID"] = delivery_df["QAI ID"].apply(TextUtils.fix_qai_id)
+            delivery_df = delivery_df[delivery_df["QAI ID"].astype(str).str.strip().ne("")]
+        delivery_df = delivery_df.drop_duplicates().reset_index(drop=True)
         rating_df = self._build_rating_dataframe(delivery_df)
         self.sheets.append_dataframe(self.delivery_target, delivery_df.drop(columns=["Rating"], errors="ignore"))
         self.sheets.append_dataframe(self.rating_target, rating_df)
@@ -887,6 +1115,11 @@ class DataExporter:
     def _build_rating_dataframe(complete_charter_data: pd.DataFrame) -> pd.DataFrame:
         df = complete_charter_data[["Project Name", "QAI ID", "Final Working Hour", "Rating"]].copy()
         df["Final Working Hour"] = pd.to_numeric(df["Final Working Hour"], errors="coerce").fillna(0)
+        df = df[df["QAI ID"].astype(str).str.strip().ne("")]
+        if df.empty:
+            return pd.DataFrame(
+                columns=["Project Name", "QAI ID", "Rating", "Final Working Hour", "Contribution%"]
+            )
         grouped = df.groupby(["Project Name", "QAI ID"], as_index=False).agg(
             {"Final Working Hour": "sum", "Rating": "first"}
         )
@@ -951,7 +1184,7 @@ class FinalReportGenerator:
 
     def _load_worksheet_dataframe(self, target: GoogleSheetTarget) -> pd.DataFrame:
         worksheet = self.sheets.worksheet(target)
-        values = worksheet.get_all_values()
+        values = self.sheets._with_retry(worksheet.get_all_values)
         if len(values) <= 1:
             return pd.DataFrame()
         return pd.DataFrame(values[1:], columns=values[0])
